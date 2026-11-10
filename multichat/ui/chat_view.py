@@ -243,6 +243,16 @@ class ChatView(QTextBrowser):
 
     def reset_history(self) -> None:
         """Drop the paused model as well as its document when a group is cleared/reused."""
+        # Removed groups stay alive for reuse. Their old replies and retries must
+        # stop now, including failures that an aborted reply would otherwise emit.
+        self._images.cancel_all()
+        for timer in (self._failure_timer, self._image_retry, self._relayout):
+            timer.stop()
+        self.pending.clear()
+        self.failed.clear()
+        self._attempts.clear()
+        self._failure_notifications.clear()
+        self._loaded_keys.clear()
         self.retained_messages.clear()
         self._rebuild_anchor = None
         self.held = False
@@ -250,6 +260,7 @@ class ChatView(QTextBrowser):
         self.scroll_to_bottom()
         self.unseen = 0
         self._update_jump()
+        self.update_animations()  # cached movies stay reusable, but no longer visible
 
     def _read_anchor(self) -> tuple:
         """The character currently at the top, including its offset inside a wrapped line."""

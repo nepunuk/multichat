@@ -79,6 +79,14 @@ class ImageTransfers(QObject):
         if self._closed:
             return
         self._closed = True
+        self.cancel_all()
+
+    def cancel_all(self) -> None:
+        """Discard current requests without closing this reusable transport.
+
+        Clear queues and disconnect every reply before aborting any of them: an
+        abort must neither publish an obsolete failure nor start a queued image.
+        """
         self.waiting.clear()
         self._queued.clear()
         states = list(self.active.values())

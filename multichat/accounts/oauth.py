@@ -135,6 +135,15 @@ class Account:
     def extra_headers(self) -> dict:
         return {}
 
+    def _session_generation(self, generation: int | None = None) -> int:
+        """Pin an operation to its session, including work before the first API request."""
+        with self._state_lock:
+            if generation is not None and generation != self.session_gen:
+                raise ApiError(
+                    _("{platform} session expired – please log in again").format(platform=self.name), status=401
+                )
+            return self.session_gen
+
     # ---- OAuth ---------------------------------------------------------- #
     async def login(self) -> dict:
         cid, secret = self.creds(self.platform)

@@ -657,8 +657,16 @@ class MainWindow(GroupsMixin, ConnectionsMixin, MessagesMixin, SendMixin, QMainW
         if hasattr(self, "_save_timer"):
             self._save_timer.stop()
         self.emote_complete.shutdown()
-        self.save_config()
-        self.mod.notes.save()
+        # Persistence failures must not skip the other save or resource cleanup.
+        # In particular, a settings error must not lose a pending note on exit.
+        try:
+            self.save_config()
+        except Exception:  # noqa: BLE001
+            log.exception("Saving settings while closing failed")
+        try:
+            self.mod.notes.save()
+        except Exception:  # noqa: BLE001
+            log.exception("Saving moderation notes while closing failed")
         for t in self.readers.values():
             t.cancel()
         for panel in [*self.panels, *self._spare]:

@@ -49,6 +49,7 @@ class VideoTile(QFrame):
         self.auto = AutoQuality()  # the level while the quality is "Automatic"
         self.gen = 0
         self.state = "idle"
+        self._manually_stopped = False
         self.muted = True
         self._mute_sent = False  # mute state not yet passed to mpv
         self._started = 0.0  # time.monotonic() of the last start()
@@ -145,6 +146,7 @@ class VideoTile(QFrame):
         destroying mpv players blocks the window (~0.3 s each with GPU decoding)."""
         self.key = key
         self.value = ""
+        self._manually_stopped = False
         self._set_title(channel)
         self.quality = normalize_quality(quality)
         self.auto.reset()
@@ -166,6 +168,8 @@ class VideoTile(QFrame):
         retry timer does it (the log showed offline channels checked every few seconds)."""
         value = value.strip()
         self.setVisible(bool(value))
+        if value == self.value and self._manually_stopped:
+            return
         waiting = self.state in ("offline", "ended") and time.monotonic() - self._started > RECHECK_AFTER
         if value != self.value or self.state == "idle" or waiting:
             if value != self.value:
@@ -199,6 +203,7 @@ class VideoTile(QFrame):
         self.video._pending = None
 
     def start(self) -> None:
+        self._manually_stopped = False
         self.retry.stop()
         self.watch.stop()
         self.auto_timer.stop()
@@ -215,7 +220,10 @@ class VideoTile(QFrame):
             self._show_message(_("Looking for stream …"))
         self.runner(self._resolve(), then=lambda res: self._resolved(gen, res))
 
-    def stop(self) -> None:
+    def stop(self, *, manual: bool = False) -> None:
+        # Layout updates preserve a toolbar stop; a disconnect ends that intent
+        # so reconnecting the channel can start this tile again.
+        self._manually_stopped = manual
         self.gen += 1
         self.retry.stop()
         self.watch.stop()
@@ -235,7 +243,7 @@ class VideoTile(QFrame):
         if self.state == "idle":
             self.start()
         else:
-            self.stop()
+            self.stop(manual=True)
 
     async def _resolve(self):
         try:
@@ -334,7 +342,7 @@ class VideoTile(QFrame):
             self.auto.reset(self._tile_pixels())
         self._show_auto_level()
         self.quality_changed.emit()
-        if self.value:
+        if self.value and not self._manually_stopped:
             self.start()
 
     # ---- Quality "Automatic" (the rules are in auto_quality.py) ------------- #
@@ -556,7 +564,7 @@ class VideoPanel(QWidget):
             self._remember()
             tile = self.tiles.pop(key)
             tile.idle_stop.stop()
-            if tile.state != "idle":
+            if tile.state != "idle" or tile._manually_stopped:
                 tile.stop()
             tile.set_muted(True)
             tile.hide()
@@ -574,7 +582,7 @@ class VideoPanel(QWidget):
     def stop_hidden(self, keep: set[str]) -> None:
         """Stops tiles of channels that are no longer connected (instead of letting them run)."""
         for key, tile in self.tiles.items():
-            if key not in keep and tile.state != "idle":
+            if key not in keep and (tile.state != "idle" or tile._manually_stopped):
                 tile.stop()
 
     def apply_audio(self, audio: str | None) -> None:

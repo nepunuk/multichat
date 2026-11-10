@@ -32,6 +32,63 @@ def test_file_backend_roundtrip(tmp_path):
     assert SecretStore("tokens", FileBackend(tmp_path)).get("twitch") == {"access_token": "x"}
 
 
+def test_file_backend_unicode_roundtrip(tmp_path):
+    backend = FileBackend(tmp_path)
+    data = {"youtube": {"access_token": "synthetic", "user_name": "Grüße 世界"}}
+    backend.save("tokens", data)
+    assert backend.load("tokens") == data
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file permissions require a POSIX filesystem")
+@pytest.mark.parametrize("key", ["tokens", "apps"])
+@pytest.mark.parametrize("temporary", ["{key}.tmp", ".{key}.json.tmp"])
+def test_file_backend_repairs_private_mode_after_stale_temp(tmp_path, key, temporary):
+    # Existing installations can have a readable parent and a leftover temp file
+    # with wider permissions. Neither may make newly saved secrets readable.
+    tmp_path.chmod(0o755)
+    stale = tmp_path / temporary.format(key=key)
+    stale.write_text("old non-secret data")
+    stale.chmod(0o644)
+    backend = FileBackend(tmp_path)
+    backend.save(key, {"secret": "synthetic"})
+    assert backend.load(key) == {"secret": "synthetic"}
+    assert backend.path(key).stat().st_mode & 0o777 == 0o600
+    if stale.exists():
+        assert "synthetic" not in stale.read_text()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX O_NOFOLLOW and symlink creation required")
+@pytest.mark.parametrize("temporary", ["tokens.tmp", ".tokens.json.tmp"])
+def test_file_backend_never_writes_through_temporary_symlink(tmp_path, temporary):
+    backend = FileBackend(tmp_path)
+    backend.save("tokens", {"secret": "previous"})
+    victim = tmp_path / "unrelated.txt"
+    victim.write_text("untouched")
+    (tmp_path / temporary).symlink_to(victim)
+    if temporary.startswith("."):
+        with pytest.raises(OSError):
+            backend.save("tokens", {"secret": "new"})
+        assert backend.load("tokens") == {"secret": "previous"}
+    else:
+        backend.save("tokens", {"secret": "new"})
+        assert backend.load("tokens") == {"secret": "new"}
+    assert victim.read_text() == "untouched"
+    assert not backend.path("tokens").is_symlink()
+
+
+def test_file_backend_keeps_previous_secrets_if_replace_fails(tmp_path, monkeypatch):
+    backend = FileBackend(tmp_path)
+    backend.save("tokens", {"secret": "previous"})
+
+    def failed_replace(*args):
+        raise OSError("synthetic storage failure")
+
+    monkeypatch.setattr(os, "replace", failed_replace)
+    with pytest.raises(OSError, match="synthetic storage failure"):
+        backend.save("tokens", {"secret": "new"})
+    assert backend.load("tokens") == {"secret": "previous"}
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits require a POSIX filesystem")
 def test_file_backend_is_private(tmp_path):
     s = SecretStore("tokens", FileBackend(tmp_path))

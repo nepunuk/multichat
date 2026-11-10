@@ -66,33 +66,62 @@ class OverlayServer:
         self._page: str | None = None
         self.runner: web.AppRunner | None = None
         self.port: int | None = None
+        self._lifecycle_lock = asyncio.Lock()
 
     @property
     def running(self) -> bool:
         return self.runner is not None
 
     async def start(self, port: int) -> None:
-        if self.runner:
-            return
-        app = web.Application()
-        app.router.add_get("/", self._index)
-        app.router.add_get("/ws", self._ws)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        try:
-            await web.TCPSite(runner, "127.0.0.1", port).start()
-        except OSError:
-            await runner.cleanup()
-            raise
-        self.runner, self.port = runner, port
+        # A stop requested while the socket is being created must wait for that
+        # start, then close it. Concurrent starts must not create orphan runners.
+        async with self._lifecycle_lock:
+            if self.runner:
+                return
+            app = web.Application()
+            app.router.add_get("/", self._index)
+            app.router.add_get("/ws", self._ws)
+            runner = web.AppRunner(app)
+            try:
+                await runner.setup()
+                await web.TCPSite(runner, "127.0.0.1", port).start()
+            except BaseException:
+                cancelled = await self._cleanup(runner)
+                if cancelled is not None:
+                    raise cancelled
+                raise
+            self.runner, self.port = runner, port
 
     async def stop(self) -> None:
-        for ws in list(self.clients):
-            await ws.close()
-        self.clients.clear()
-        if self.runner:
-            await self.runner.cleanup()
-        self.runner = None
+        async with self._lifecycle_lock:
+            cancelled = await self._cleanup(self.runner)
+            self.runner, self.port = None, None
+            if cancelled is not None:
+                raise cancelled
+
+    async def _cleanup(self, runner: web.AppRunner | None) -> asyncio.CancelledError | None:
+        # Shutdown cancels every task, so cleanup must stay in the owning task:
+        # a shielded child could be cancelled before its cleanup body even runs.
+        # Finish releasing resources before reporting cancellation to the caller.
+        cancelled = None
+        while True:
+            try:
+                try:
+                    # Close every client before runner cleanup waits for handlers.
+                    for ws in list(self.clients):
+                        while True:
+                            try:
+                                await ws.close()
+                                break
+                            except asyncio.CancelledError as error:
+                                cancelled = error
+                finally:
+                    self.clients.clear()
+                    if runner is not None:
+                        await runner.cleanup()
+                return cancelled
+            except asyncio.CancelledError as error:
+                cancelled = error
 
     def _allowed(self, request: web.Request) -> bool:
         """Only this machine: the Host header stops DNS rebinding, the Origin header stops
