@@ -12,7 +12,6 @@ import logging
 import os
 import re
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import urljoin
@@ -60,22 +59,25 @@ class Stream:
     height: int = 0  # height of the chosen variant, where known
 
 
-class AdWatch(logging.Handler):
-    """Listens to Streamlink messages about ad breaks and remembers until when they last."""
+class AdWatch:
+    """Reports ad filtering for one opened Twitch reader, including pre-rolls.
 
-    def __init__(self) -> None:
-        super().__init__(logging.INFO)
-        self.until = 0.0
+    Streamlink's HLS writer pauses its FilteredStream reader while discarding ad
+    segments and resumes it when content returns (available since before 7.0).
+    Its module-wide log messages carry no channel/session identity.
+    """
 
-    def emit(self, record: logging.LogRecord) -> None:
-        msg = record.getMessage().lower()
-        if "advertisement" in msg or "pre-roll" in msg or "ad segment" in msg and "will skip" not in msg:
-            m = re.search(r"(\d+(?:\.\d+)?)\s*second", msg)
-            self.until = max(self.until, time.time() + (float(m.group(1)) if m else 30.0) + 3)
+    def __init__(self, reader) -> None:
+        self._reader = reader
+
+    def close(self) -> None:
+        self._reader = None
 
     @property
     def active(self) -> bool:
-        return time.time() < self.until
+        reader = self._reader
+        paused = getattr(reader, "is_paused", None)
+        return bool(callable(paused) and not reader.closed and paused())
 
 
 def normalize_quality(name: str | None) -> str:
@@ -308,16 +310,11 @@ def _twitch(channel: str, max_h: int) -> Stream:
     except Exception:  # noqa: BLE001
         pass
 
-    ads = AdWatch()
-    sl_log = logging.getLogger("streamlink")
-    if sl_log.getEffectiveLevel() > logging.INFO:  # Streamlink defaults to WARNING → ad messages would never arrive
-        sl_log.setLevel(logging.INFO)
-    sl_log.addHandler(ads)
     try:
         src = streams[name].open()
     except Exception as e:  # noqa: BLE001
-        logging.getLogger("streamlink").removeHandler(ads)
         raise RuntimeError(_("Streamlink: the stream cannot be opened ({error})").format(error=e)) from e
+    ads = AdWatch(src)
     log.info("Twitch %s: Streamlink variant %s (ad filter on)", channel, name)
 
     rfd, wfd = os.pipe()
@@ -339,17 +336,18 @@ def _twitch(channel: str, max_h: int) -> Stream:
         except Exception as e:  # noqa: BLE001
             log.warning("Twitch %s: Streamlink error: %s", channel, e)
         finally:
+            ads.close()
             for f in (src.close, lambda: os.close(wfd)):
                 try:
                     f()
                 except Exception:  # noqa: BLE001
                     pass
-            logging.getLogger("streamlink").removeHandler(ads)
 
     threading.Thread(target=pump, name=f"streamlink-{channel}", daemon=True).start()
 
     def close() -> None:
         stop.set()
+        ads.close()
         try:
             src.close()
         except Exception:  # noqa: BLE001

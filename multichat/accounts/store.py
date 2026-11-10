@@ -17,6 +17,8 @@ import os
 import threading
 from pathlib import Path
 
+from ..core.config import write_private
+
 log = logging.getLogger("multichat.secrets")
 
 SERVICE = "multichat"
@@ -35,7 +37,7 @@ class FileBackend:
 
     def load(self, key: str) -> dict | None:
         try:
-            return json.loads(self.path(key).read_text())
+            return json.loads(self.path(key).read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
         except Exception as e:  # noqa: BLE001
@@ -43,13 +45,7 @@ class FileBackend:
             return None
 
     def save(self, key: str, data: dict) -> None:
-        self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = self.path(key)
-        tmp = path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
+        write_private(self.path(key), data)
 
     def delete(self, key: str) -> None:
         self.path(key).unlink(missing_ok=True)
