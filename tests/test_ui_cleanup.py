@@ -188,4 +188,3 @@ def test_close_flushes_notes_and_shuts_down_after_real_config_write_failure(
     saved = json.loads(w.mod.notes.path.read_text(encoding="utf-8"))
     assert saved[ModNotes.key(message)]["note"] == "Flush this pending note during close"
     assert "settings" in caplog.text.lower() and "closing" in caplog.text.lower()
-

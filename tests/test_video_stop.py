@@ -159,4 +159,3 @@ def test_background_timeout_does_not_turn_into_manual_stop(panel, _session_qappl
 
     widget.set_entries(ENTRY)
     assert tile.state == "playing" and len(resolved) == 2
-
